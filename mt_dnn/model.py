@@ -2,6 +2,7 @@
 # Copyright (c) Microsoft. All rights reserved.
 import logging
 import sys
+import random
 import numpy as np
 import torch
 import torch.nn as nn
@@ -41,6 +42,7 @@ class MTDNNModel(object):
         self.optimizer.zero_grad()
         self._setup_lossmap(self.config)
         self._setup_kd_lossmap(self.config)
+        self.sampler = None
 
     def _get_param_groups(self):
         no_decay = ['bias', 'gamma', 'beta', 'LayerNorm.bias', 'LayerNorm.weight']
@@ -201,6 +203,98 @@ class MTDNNModel(object):
             # reset number of the grad accumulation
             self.optimizer.step()
             self.optimizer.zero_grad()
+
+    def update_all(self, batch_metas, batch_datas):
+        self.network.train()
+        task_losses = []
+        max_loss = 0
+        max_task = 0
+        with torch.no_grad():
+            for i, (batch_meta, batch_data) in enumerate(zip(batch_metas, batch_datas)):
+                y = batch_data[batch_meta['label']]
+                y = self._to_cuda(y) if self.config['cuda'] else y
+
+                task_id = batch_meta['task_id']
+                assert task_id == i
+                inputs = batch_data[:batch_meta['input_len']]
+                if len(inputs) == 3:
+                    inputs.append(None)
+                    inputs.append(None)
+                inputs.append(task_id)
+                weight = None
+                if self.config.get('weighted_on', False):
+                    if self.config['cuda']:
+                        weight = batch_data[batch_meta['factor']].cuda(non_blocking=True)
+                    else:
+                        weight = batch_data[batch_meta['factor']]
+                logits = self.mnetwork(*inputs)
+
+                # compute loss
+                loss = 0
+                if self.task_loss_criterion[task_id] and (y is not None):
+                    loss = self.task_loss_criterion[task_id](logits, y, weight, ignore_index=-1)
+
+                # compute kd loss
+                if self.config.get('mkd_opt', 0) > 0 and ('soft_label' in batch_meta):
+                    soft_labels = batch_meta['soft_label']
+                    soft_labels = self._to_cuda(soft_labels) if self.config['cuda'] else soft_labels
+                    kd_lc = self.kd_task_loss_criterion[task_id]
+                    kd_loss = kd_lc(logits, soft_labels, weight, ignore_index=-1) if kd_lc else 0
+                    loss = loss + kd_loss
+                
+                if loss > max_loss:
+                    max_loss = loss
+                    max_task = i
+                task_losses.append(loss.item())
+        # print(task_losses)
+        p = np.array(task_losses)
+        p /= p.sum()
+        sampled_id = 0
+        if random.random() < 0.3:
+            sampled_id = max_task
+        else:
+            sampled_id = np.random.choice(list(range(len(task_losses))), p=p, replace=False)
+        # print("task ", sampled_id, " is selected")
+        self.loss_list = task_losses
+        self.update(batch_metas[sampled_id], batch_datas[sampled_id])
+
+    def calculate_loss(self, batch_meta, batch_data):
+        self.network.train()
+        with torch.no_grad():
+            y = batch_data[batch_meta['label']]
+            y = self._to_cuda(y) if self.config['cuda'] else y
+
+            task_id = batch_meta['task_id']
+            inputs = batch_data[:batch_meta['input_len']]
+            # print(batch_meta)
+            # for i, inp in enumerate(inputs):
+            #     print(i, inp.size())
+            if len(inputs) == 3:
+                inputs.append(None)
+                inputs.append(None)
+            inputs.append(task_id)
+            weight = None
+            if self.config.get('weighted_on', False):
+                if self.config['cuda']:
+                    weight = batch_data[batch_meta['factor']].cuda(non_blocking=True)
+                else:
+                    weight = batch_data[batch_meta['factor']]
+            logits = self.mnetwork(*inputs)
+
+            # compute loss
+            loss = 0
+            if self.task_loss_criterion[task_id] and (y is not None):
+                loss = self.task_loss_criterion[task_id](logits, y, weight, ignore_index=-1)
+
+            # compute kd loss
+            if self.config.get('mkd_opt', 0) > 0 and ('soft_label' in batch_meta):
+                soft_labels = batch_meta['soft_label']
+                soft_labels = self._to_cuda(soft_labels) if self.config['cuda'] else soft_labels
+                kd_lc = self.kd_task_loss_criterion[task_id]
+                kd_loss = kd_lc(logits, soft_labels, weight, ignore_index=-1) if kd_lc else 0
+                loss = loss + kd_loss
+        return loss   
+
 
     def encode(self, batch_meta, batch_data):
         self.network.eval()

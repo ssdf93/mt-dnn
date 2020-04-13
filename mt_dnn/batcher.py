@@ -72,6 +72,54 @@ class MultiTaskBatchSampler(BatchSampler):
             random.shuffle(all_indices)
         return all_indices
 
+class ACLSampler(BatchSampler):
+    def __init__(self, datasets, batch_size, controller):
+        self._datasets = datasets
+        # print("batch+++++size =======", batch_size)
+        self._batch_size = batch_size
+        self.lengths = []
+        train_data_list = []
+        for dataset in datasets:
+            train_data_list.append(self._get_shuffled_index_batches(len(dataset), batch_size))
+            self.lengths.append(len(dataset))
+        self._train_data_list = train_data_list
+        self.controller = controller
+
+    @staticmethod
+    def _get_shuffled_index_batches(dataset_len, batch_size):
+        index_batches = [list(range(i, min(i+batch_size, dataset_len))) for i in range(0, dataset_len, batch_size)]
+        random.shuffle(index_batches)
+        return index_batches
+    
+    def __len__(self):
+        return max(len(train_data) for train_data in self._train_data_list)*len(self._train_data_list)
+
+    def __iter__(self):
+        self.controller.initalization(max_step=len(self))
+        self.all_iters = [iter(item) for item in self._train_data_list]
+        return self
+        
+    def __next__(self):
+        local_task_idx = self.controller.get_task_id()
+        if local_task_idx is not None:
+            task_id = self._datasets[local_task_idx].get_task_id()
+            try:
+                batch = next(self.all_iters[local_task_idx])
+            except StopIteration:
+                self.all_iters[local_task_idx] = iter(self._train_data_list[local_task_idx])
+                batch = next(self.all_iters[local_task_idx])
+            return [(task_id, sample_id) for sample_id in batch]
+        else:
+            raise StopIteration
+
+    @staticmethod
+    def _gen_task_indices(train_data_list):
+        max_length = max([len(data_list) for data_list in train_data_list])
+        result_indices = list(range(len(train_data_list))) * max_length
+        return result_indices
+
+
+
 class MultiTaskDataset(Dataset):
     def __init__(self, datasets):
         self._datasets = datasets
@@ -359,8 +407,8 @@ class Collater:
             type_ids = torch.LongTensor(batch_size, tok_len).fill_(0)
             masks = torch.LongTensor(batch_size, tok_len).fill_(0)
         if self.__if_pair__(data_type):
-            hypothesis_masks = torch.ByteTensor(batch_size, tok_len).fill_(1)
-            premise_masks = torch.ByteTensor(batch_size, premise_len).fill_(1)
+            hypothesis_masks = torch.BoolTensor(batch_size, tok_len).fill_(1)
+            premise_masks = torch.BoolTensor(batch_size, tok_len).fill_(1)
         for i, sample in enumerate(batch):
             select_len = min(len(sample['token_id']), tok_len)
             tok = sample['token_id']

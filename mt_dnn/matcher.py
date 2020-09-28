@@ -46,7 +46,12 @@ class SANBertNetwork(nn.Module):
         config_class, model_class, tokenizer_class = MODEL_CLASSES[literal_encoder_type]
         self.preloaded_config = config_class.from_dict(opt)  # load config from opt
         self.preloaded_config.output_hidden_states = True # return all hidden states
-        self.bert = model_class(self.preloaded_config)
+        if opt['encoder_type'] == EncoderModelType.DEBERTA:
+            self.bert = model_class(pre_trained=opt['init_checkpoint'])
+            self.bert.apply_state()
+            initial_from_local = True
+        else:
+            self.bert = model_class(self.preloaded_config)
         hidden_size = self.bert.config.hidden_size
 
         if opt.get('dump_feature', False):
@@ -95,29 +100,7 @@ class SANBertNetwork(nn.Module):
                 else:
                     out_proj = nn.Linear(hidden_size, lab)
             self.scoring_list.append(out_proj)
-
         self.opt = opt
-        self._my_init()
-        # if not loading from local, loading model weights from pre-trained model, after initialization
-        if not initial_from_local:
-            config_class, model_class, tokenizer_class = MODEL_CLASSES[literal_encoder_type]
-            self.bert = model_class.from_pretrained(opt['init_checkpoint'], config=self.preloaded_config)
-
-    def _my_init(self):
-        def init_weights(module):
-            if isinstance(module, (nn.Linear, nn.Embedding)):
-                # Slightly different from the TF version which uses truncated_normal for initialization
-                # cf https://github.com/pytorch/pytorch/pull/5617
-                module.weight.data.normal_(mean=0.0, std=0.02 * self.opt['init_ratio'])
-            if isinstance(module, LayerNorm):
-                # Layer normalization (https://arxiv.org/abs/1607.06450)
-                module.bias.data.zero_()
-                module.weight.data.fill_(1.0)
-            if isinstance(module, nn.Linear):
-                if module.bias is not None:
-                    module.bias.data.zero_()
-        self.apply(init_weights)
-
 
     def embed_encode(self, input_ids, token_type_ids=None, attention_mask=None):
         # support BERT now

@@ -258,12 +258,19 @@ def main():
             config_class, model_class, tokenizer_class = MODEL_CLASSES[literal_encoder_type]
             config = config_class.from_pretrained(arch).to_dict()
             state_dict = {'state': state}
+        elif encoder_type == EncoderModelType.DEBERTA:
+            pass #TODO
     else:
         if opt['encoder_type'] not in EncoderModelType._value2member_map_:
             raise ValueError("encoder_type is out of pre-defined types")
         literal_encoder_type = EncoderModelType(opt['encoder_type']).name.lower()
         config_class, model_class, tokenizer_class = MODEL_CLASSES[literal_encoder_type]
-        config = config_class.from_pretrained(init_model).to_dict()
+        if opt['encoder_type'] == EncoderModelType.DEBERTA:
+            model = model_class(pre_trained=init_model)
+            config = model.config.to_dict()
+            del model
+        else:
+            config = config_class.from_pretrained(init_model).to_dict()
 
     config['attention_probs_dropout_prob'] = args.bert_dropout_p
     config['hidden_dropout_prob'] = args.bert_dropout_p
